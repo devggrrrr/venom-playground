@@ -153,6 +153,83 @@ async function walletGen(client) {
 
     const everWalletAddress = `0:`+(await client.boc.get_boc_hash({boc: stateInit})).hash;
     console.log('Address: ', everWalletAddress);
+
+    let balance
+    for (; ;) {
+        console.log("Waiting for balance")
+        // The idiomatic way to send a request is to specify 
+        // query and variables as separate properties.
+        const getBalanceQuery = `
+                query getBalance($address: String!) {
+                    blockchain {
+                    account(address: $address) {
+                            info {
+                            balance
+                        }
+                    }
+                }
+            }
+            `
+        const resultOfQuery = await client.net.query({
+            query: getBalanceQuery,
+            variables: { address: everWalletAddress }
+        })
+
+        const nanotokens = parseInt(resultOfQuery.result.data.blockchain.account.info?.balance, 16)
+        if (nanotokens > .1 * 1e9) {
+            balance = nanotokens / 1e9
+            break
+        }
+        // TODO: rate limiting
+        await sleep(1000)
+    }
+    console.log(`Account balance is: ${balance.toString(10)} tokens`)
+
+
+    let body = (await client.abi.encode_message_body({
+        address: everWalletAddress,
+        abi: { type: 'Json', value: everWalletABI },
+        call_set: {      
+            function_name: 'sendTransaction',
+            input: {
+                dest: '0:0a9f2f53ea912f6612e240ab5cba3ec83f878859aeb8fde62cbf5ac968899a99',
+                value: '100000000', // amount in nano EVER
+                bounce: false,
+                flags: 3,
+                payload: ''
+            }
+        },
+        is_internal:true,
+        signer:{type: 'Keys', keys: keypair}
+    })).body;
+
+    try {
+        let deployAndTransferMsg =  await client.boc.encode_external_in_message({
+            dst: everWalletAddress,
+            init: stateInit,
+            body: body
+        });
+    
+        let sendRequestResult = await client.processing.send_message({
+            message: deployAndTransferMsg.message,
+            send_events: false
+        });
+    
+        let transaction = (await client.processing.wait_for_transaction({
+            abi: { type: 'Json', value: everWalletABI },
+            message: deployAndTransferMsg.message,
+            shard_block_id: sendRequestResult.shard_block_id,
+            send_events: false
+        })).transaction;
+        console.log(transaction)
+
+    } catch (e) {
+        console.log(e)
+    }
+}
+
+async function deployAndSend(client, keypair, everWalletAddress) {
+    
 }
 
 async function calcWalletAddress(client, keys) {
@@ -264,6 +341,7 @@ const client = new TonClient({
 
 async function run() {
     await walletGen(client)
+    // await deployAndSend(client, keypair, address)
 }
 
 const HelloWallet = {
