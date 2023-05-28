@@ -14,7 +14,7 @@ function sleep(ms) {
     });
   }
 
-MINIMAL_BALANCE = .01
+MINIMAL_BALANCE = .5
 
 TonClient.useBinaryLibrary(libNode);
 
@@ -33,10 +33,10 @@ async function main(client) {
     console.log('Do not forget to save the keys!')
 
     // To deploy a wallet we need its TVC and ABI files
-    const msigTVC =
-        readFileSync(path.resolve(__dirname, "./HelloWallet.tvc")).toString("base64")
-    const msigABI =
-        readFileSync(path.resolve(__dirname, "./HelloWallet.abi.json")).toString("utf8")
+    const everWalletCode =
+    readFileSync(path.resolve(__dirname, "./Wallet.code.boc")).toString("base64")
+    const everWalletABI =
+    readFileSync(path.resolve(__dirname, "./everWallet.abi.json")).toString("utf8")
 
     // We need to know the future address of the wallet account,
     // because its balance must be positive for the contract to be deployed
@@ -44,8 +44,8 @@ async function main(client) {
     // https://docs.everos.dev/ever-sdk/reference/types-and-methods/mod_abi#encode_message
 
     const messageParams = {
-        abi: { type: 'Json', value: msigABI },
-        deploy_set: { tvc: msigTVC, initial_data: {} },
+        abi: { type: 'Json', value: everWalletABI },
+        deploy_set: { tvc: everWalletCode, initial_data: {} },
         signer: { type: 'Keys', keys: keypair },
         processing_try_index: 1
     }
@@ -154,9 +154,17 @@ async function walletGen(client) {
     const everWalletAddress = `0:`+(await client.boc.get_boc_hash({boc: stateInit})).hash;
     console.log('Address: ', everWalletAddress);
 
+
+
+    console.log(`You can topup your wallet from dashboard at https://dashboard.evercloud.dev`)
+    console.log(`Please send >= ${MINIMAL_BALANCE} tokens to ${everWalletAddress}`)
+    console.log(`awaiting...`)
+
+    // Blocking here, waiting for account balance changes.
+    // It is assumed that at this time you go to dashboard.evercloud.dev
+    // and replenish this account.
     let balance
     for (; ;) {
-        console.log("Waiting for balance")
         // The idiomatic way to send a request is to specify 
         // query and variables as separate properties.
         const getBalanceQuery = `
@@ -176,60 +184,69 @@ async function walletGen(client) {
         })
 
         const nanotokens = parseInt(resultOfQuery.result.data.blockchain.account.info?.balance, 16)
-        if (nanotokens > .1 * 1e9) {
+        if (nanotokens > MINIMAL_BALANCE * 1e9) {
             balance = nanotokens / 1e9
             break
         }
+        console.log("Waiting For Balance Change")
         // TODO: rate limiting
         await sleep(1000)
     }
     console.log(`Account balance is: ${balance.toString(10)} tokens`)
 
 
+
+    console.log(`Making first transfer+deploy from ever-wallet contract to address: -1:7777777777777777777777777777777777777777777777777777777777777777 and waiting for transaction...`)
+// Here we need to construct body by ABI and then the external message using native encoding (boc.encode_external_in_message)
+// because client.processing.encode_message uses some ABI specifics for contract deploy data encoding
+// and in case of this func contract it will not work. It is only ABI compatible for transfers
+// but not for deploy. This is why we encode body by ABI, but still need to encode stateInit and
+// the result deploy message natively.
+// This is needed only for the deploy message. For transfers you can encode message using
+// `client.abi.encode_message`, providing the same paramerers as in `encode_message_body` below. 
+  
     let body = (await client.abi.encode_message_body({
         address: everWalletAddress,
         abi: { type: 'Json', value: everWalletABI },
         call_set: {      
             function_name: 'sendTransaction',
             input: {
-                dest: '0:0a9f2f53ea912f6612e240ab5cba3ec83f878859aeb8fde62cbf5ac968899a99',
-                value: '100000000', // amount in nano EVER
+                dest: '0:0ea708ba60a432405d21b68a42c15b2d4684e290c9fde13f49580d602172e780',
+                value: '500000000', // amount in nano EVER
                 bounce: false,
                 flags: 3,
                 payload: ''
             }
         },
-        is_internal:true,
+        is_internal:false,
         signer:{type: 'Keys', keys: keypair}
     })).body;
 
-    try {
-        let deployAndTransferMsg =  await client.boc.encode_external_in_message({
-            dst: everWalletAddress,
-            init: stateInit,
-            body: body
-        });
-    
-        let sendRequestResult = await client.processing.send_message({
-            message: deployAndTransferMsg.message,
-            send_events: false
-        });
-    
-        let transaction = (await client.processing.wait_for_transaction({
-            abi: { type: 'Json', value: everWalletABI },
-            message: deployAndTransferMsg.message,
-            shard_block_id: sendRequestResult.shard_block_id,
-            send_events: false
-        })).transaction;
-        console.log(transaction)
+    let deployAndTransferMsg =  await client.boc.encode_external_in_message({
+        dst: everWalletAddress,
+        init: stateInit,
+        body: body
+    });
 
-    } catch (e) {
-        console.log(e)
-    }
+    let sendRequestResult = await client.processing.send_message({
+        message: deployAndTransferMsg.message,
+        send_events: false
+    });
+
+    let transaction = (await client.processing.wait_for_transaction({
+        abi: { type: 'Json', value: everWalletABI },
+        message: deployAndTransferMsg.message,
+        shard_block_id: sendRequestResult.shard_block_id,
+        send_events: false
+    })).transaction;
+
+
+    console.log('Contract deployed. Transaction hash', transaction.id)
+    // assert.equal(transaction.status, 3)
+    // assert.equal(transaction.status_name, "finalized")
 }
 
 async function deployAndSend(client, keypair, everWalletAddress) {
-    
 }
 
 async function calcWalletAddress(client, keys) {
